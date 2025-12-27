@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""
+System tray monitor/controller for nerd-dictation.
+
+Displays dictation state and allows toggling by clicking the icon.
+Does not start dictation - only observes and controls existing process.
+
+Requires: pip install pystray pillow
+"""
+
+import os
+import signal
+import sys
+import tempfile
+import threading
+import time
+from typing import Any, Optional, Tuple
+
+TEMP_COOKIE_NAME = "nerd-dictation.cookie"
+
+
+def get_cookie_path() -> str:
+    return os.path.join(tempfile.gettempdir(), TEMP_COOKIE_NAME)
+
+
+def process_get_state(path_to_cookie: str) -> Tuple[str, int]:
+    """
+    Detect nerd-dictation process state.
+    Returns: (state, pid) where state is 'not_running' | 'suspended' | 'running'
+    """
+    if not os.path.exists(path_to_cookie):
+        return ('not_running', 0)
+
+    try:
+        with open(path_to_cookie, 'r', encoding='utf-8') as fh:
+            pid = int(fh.read().strip())
+    except (ValueError, OSError):
+        return ('not_running', 0)
+
+    proc_stat_path = '/proc/{:d}/stat'.format(pid)
+    if not os.path.exists(proc_stat_path):
+        return ('not_running', 0)
+
+    try:
+        with open(proc_stat_path, 'r', encoding='utf-8') as fh:
+            content = fh.read()
+            paren_end = content.rfind(')')
+            if paren_end == -1:
+                return ('not_running', 0)
+            state_char = content[paren_end + 2:paren_end + 3]
+            if state_char == 'T':
+                return ('suspended', pid)
+            return ('running', pid)
+    except OSError:
+        return ('not_running', 0)
+
+
+def create_icon_image(color: str, size: int = 64) -> Any:
+    """Create a solid color square icon."""
+    from PIL import Image
+    return Image.new('RGB', (size, size), color)
+
+
+def main() -> None:
+    try:
+        import pystray
+    except ImportError as ex:
+        sys.stderr.write(
+            "Systray requires 'pystray' and 'pillow' packages.\n"
+            "Install with: pip install pystray pillow\n"
+            "Error: {}\n".format(ex)
+        )
+        sys.exit(1)
+
+    path_to_cookie = get_cookie_path()
+
+    # State tracking
+    current_state = process_get_state(path_to_cookie)[0]
+    should_exit = False
+
+    # Color scheme
+    COLORS = {
+        'not_running': '#6b7280',  # gray
+        'running': '#22c55e',       # green
+        'suspended': '#ef4444',     # red
+    }
+
+    TOOLTIPS = {
+        'not_running': 'nerd-dictation: Not running',
+        'running': 'nerd-dictation: Recording (click to suspend)',
+        'suspended': 'nerd-dictation: Suspended (click to resume)',
+    }
+
+    def on_click(icon: Any) -> None:
+        """Toggle between running/suspended on click."""
+        state, pid = process_get_state(path_to_cookie)
+        if state == 'not_running':
+            return
+        try:
+            if state == 'suspended':
+                os.kill(pid, signal.SIGCONT)
+            else:
+                os.kill(pid, signal.SIGUSR1)
+        except ProcessLookupError:
+            pass
+
+    def update_icon(icon: Any, new_state: str) -> None:
+        nonlocal current_state
+        if new_state == current_state:
+            return
+        current_state = new_state
+        icon.icon = create_icon_image(COLORS.get(new_state, COLORS['not_running']))
+        icon.title = TOOLTIPS.get(new_state, 'nerd-dictation')
+
+    def poll_state(icon: Any) -> None:
+        while not should_exit:
+            new_state = process_get_state(path_to_cookie)[0]
+            update_icon(icon, new_state)
+            time.sleep(0.25)
+
+    # Create icon with click handler
+    # Note: XOrg backend requires a menu with default=True for click to work
+    menu = pystray.Menu(
+        pystray.MenuItem("Toggle", lambda icon, item: on_click(icon), default=True, visible=False),
+    )
+
+    icon = pystray.Icon(
+        name="nerd-dictation",
+        icon=create_icon_image(COLORS.get(current_state, COLORS['not_running'])),
+        title=TOOLTIPS.get(current_state, 'nerd-dictation'),
+        menu=menu,
+    )
+
+    # Start polling thread
+    poll_thread = threading.Thread(target=poll_state, args=(icon,), daemon=True)
+    poll_thread.start()
+
+    # Run (blocks until stopped)
+    icon.run()
+
+
+if __name__ == "__main__":
+    main()
