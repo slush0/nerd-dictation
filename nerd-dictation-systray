@@ -82,8 +82,8 @@ def main() -> None:
     # Color scheme
     COLORS = {
         'not_running': '#6b7280',  # gray
-        'running': '#22c55e',       # green
-        'suspended': '#ef4444',     # red
+        'running': '#ef4444',       # red
+        'suspended': '#6b7280',     # gray
     }
 
     TOOLTIPS = {
